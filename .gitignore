@@ -107,3 +107,4 @@ results/
 
 # model checkpoints
 *.pth
+/results/test_ori_withoutShuffle/
