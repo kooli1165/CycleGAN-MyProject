@@ -102,8 +102,8 @@ ENV/
 
 # project directories
 datasets/
-output/A/
-output/B/
+output/
+results/
 
 # model checkpoints
 *.pth
