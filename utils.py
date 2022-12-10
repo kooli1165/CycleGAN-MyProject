@@ -1,3 +1,5 @@
+import math
+import os
 import random
 import time
 import datetime
@@ -7,6 +9,10 @@ from torch.autograd import Variable
 import torch
 from visdom import Visdom
 import numpy as np
+import torch.nn.functional as F
+from torch.utils.tensorboard import SummaryWriter
+from torch_utils.ops import conv2d_gradfix
+
 
 def tensor2image(tensor):
     image = 127.5*(tensor[0].cpu().float().numpy() + 1.0)
@@ -36,9 +42,9 @@ class Logger():
 
         for i, loss_name in enumerate(losses.keys()):
             if loss_name not in self.losses:
-                self.losses[loss_name] = losses[loss_name].data[0]
+                self.losses[loss_name] = losses[loss_name].item()
             else:
-                self.losses[loss_name] += losses[loss_name].data[0]
+                self.losses[loss_name] += losses[loss_name].item()
 
             if (i+1) == len(losses.keys()):
                 sys.stdout.write('%s: %.4f -- ' % (loss_name, self.losses[loss_name]/self.batch))
@@ -74,7 +80,16 @@ class Logger():
         else:
             self.batch += 1
 
-        
+
+class TensorboardLogger():
+    def __init__(self, output_path):
+        output_path = os.path.join(output_path, 'tb_log')
+        self.writer = SummaryWriter(output_path)
+
+    def add_scalars(self, losses, global_step):
+        for i, loss_name in enumerate(losses.keys()):
+            self.writer.add_scalar(loss_name, losses[loss_name], global_step)
+
 
 class ReplayBuffer():
     def __init__(self, max_size=50):
@@ -116,3 +131,77 @@ def weights_init_normal(m):
         torch.nn.init.normal(m.weight.data, 1.0, 0.02)
         torch.nn.init.constant(m.bias.data, 0.0)
 
+
+# def w_gp_loss(self, y, x, gp = False):
+
+
+
+
+def gradient_penalty(self, y, x):
+    """Compute gradient penalty: (L2_norm(dy/dx) - 1)**2."""
+    weight = torch.ones(y.size()).to(self.device)
+    dydx = torch.autograd.grad(outputs=y,
+                               inputs=x,
+                               grad_outputs=weight,
+                               retain_graph=True,
+                               create_graph=True,
+                               only_inputs=True)[0]
+
+    dydx = dydx.view(dydx.size(0), -1)
+    dydx_l2norm = torch.sqrt(torch.sum(dydx**2, dim=1))
+    return torch.mean((dydx_l2norm-1)**2)
+
+def classification_loss(self, logit, target, dataset='CelebA'):
+    """Compute binary or softmax cross entropy loss."""
+    if dataset == 'CelebA':
+        return F.binary_cross_entropy_with_logits(logit, target, size_average=False) / logit.size(0)
+    elif dataset == 'RaFD':
+        return F.cross_entropy(logit, target)
+
+def run_netD(img, netD, augment_pipe=None):
+    if augment_pipe is not None:
+        img = augment_pipe(img)
+    return netD(img)
+
+
+def d_logistic_loss(real_pred, fake_pred):
+    real_loss = F.softplus(-real_pred)
+    fake_loss = F.softplus(fake_pred)
+
+    return real_loss.mean() + fake_loss.mean()
+
+
+def d_r1_loss(real_pred, real_img):
+    with conv2d_gradfix.no_weight_gradients():
+        grad_real, = torch.autograd.grad(
+            outputs=real_pred.sum(), inputs=real_img, create_graph=True
+        )
+    grad_penalty = grad_real.pow(2).reshape(grad_real.shape[0], -1).sum(1).mean()
+
+    return grad_penalty
+
+def compute_gradient_penalty(d, x):
+    gradients = torch.autograd.grad(outputs=[d.sum()], inputs=[x], create_graph=True, only_inputs=True)[0]
+    r1_penalty = gradients.square().sum([1, 2, 3]).mean()
+    return r1_penalty
+
+def g_nonsaturating_loss(fake_pred):
+    loss = F.softplus(-fake_pred).mean()
+
+    return loss
+
+
+def g_path_regularize(fake_img, latents, mean_path_length, decay=0.01):
+    noise = torch.randn_like(fake_img) / math.sqrt(
+        fake_img.shape[2] * fake_img.shape[3]
+    )
+    grad, = torch.autograd.grad(
+        outputs=(fake_img * noise).sum(), inputs=latents, create_graph=True
+    )
+    path_lengths = torch.sqrt(grad.pow(2).sum(2).mean(1))
+
+    path_mean = mean_path_length + decay * (path_lengths.mean() - mean_path_length)
+
+    path_penalty = (path_lengths - path_mean).pow(2).mean()
+
+    return path_penalty, path_mean.detach(), path_lengths
