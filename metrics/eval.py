@@ -24,7 +24,7 @@ def eval_fid(paths):
     return fid_value
 
 
-def eval_metrics(netG_A2B, dataloader, real_path, fake_path=None, metric='fid'):
+def eval_metrics(netG_A2B, dataloader, real_path, fake_path=None, metric='fid', with_mask=False):
     if fake_path is None:
         fake_path = os.path.join('./eval_tmp')
     if not os.path.exists(fake_path):
@@ -38,7 +38,8 @@ def eval_metrics(netG_A2B, dataloader, real_path, fake_path=None, metric='fid'):
         # Generate output
         with torch.no_grad():
             fake_B = netG_A2B(real_A)
-
+            if with_mask:
+                fake_B = fake_B[0]
             # fake_B, fake_B_mask = netG_A2B(real_A)
             # fake_A, fake_A_mask = netG_B2A(real_B)
             fake_B = 0.5 * (fake_B.data + 1.0)

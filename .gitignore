@@ -104,6 +104,7 @@ ENV/
 datasets/
 output/
 results/
+eval_tmp/
 
 # model checkpoints
 *.pth

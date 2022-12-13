@@ -3,6 +3,7 @@
 import argparse
 import itertools
 import os
+import sys
 
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
@@ -27,12 +28,20 @@ from utils import compute_gradient_penalty
 from lib_add.augment_ori import AugmentPipe
 from datasets import ImageDataset
 
-# v1.1修改损失函数以适配 自适应p
-# v1.2调整 G D 训练策略  每n次迭代训练一次G  训练过程中自动测试fid kid
+from metrics.eval import eval_metrics
+
+# v1.1  修改损失函数以适配 自适应p
+# v1.2  (调整 G D 训练策略  每n次迭代训练一次G)
+#          训练过程中自动测试fid
+#          ada_kimg 80->8
+#          lambda_D 0.5 -> 1
+# v1.2.1  ada_kimg 8->0.6
+#         ada_interval 4->16
+#         每10epoch 测试fid
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--save_dir', type=str, default='./output/v1.2_dataset1.0')
+    parser.add_argument('--save_dir', type=str, default='./output/v1.2.1_dataset1.0')
     parser.add_argument('--epoch', type=int, default=0, help='starting epoch')
     parser.add_argument('--n_epochs', type=int, default=400, help='number of epochs of training')
     parser.add_argument('--batchSize', type=int, default=6, help='size of the batches')
@@ -47,20 +56,21 @@ if __name__ == '__main__':
     parser.add_argument('--output_nc', type=int, default=3, help='number of channels of output data')
     parser.add_argument('--cuda', type=bool, default=True, help='use GPU computation')
     parser.add_argument('--n_cpu', type=int, default=8, help='number of cpu threads to use during batch generation')
-    parser.add_argument('--save_every_n_epoch', type=int, default=50)
-    parser.add_argument('--eval_every_n_epoch', type=int, default=50)
+    parser.add_argument('--save_every_n_epoch', type=int, default=100)
+    parser.add_argument('--eval_every_n_epoch', type=int, default=1)
+    parser.add_argument('--eval_mode', type=str, default='test')
 
     parser.add_argument('--n_train_D', type=int, default=1, help='每多少次迭代训练一次D')
     parser.add_argument('--n_train_G', type=int, default=1, help='每多少次迭代训练一次G')
     parser.add_argument('--lambda_G', type=float, default=1.0)
     parser.add_argument('--lambda_Idt', type=float, default=5.0)
     parser.add_argument('--lambda_Cycle', type=float, default=5.0)
-    parser.add_argument('--lambda_D', type=float, default=0.5)
+    parser.add_argument('--lambda_D', type=float, default=1.0)
     # ADA
     parser.add_argument('--ada_start_p', type=float, default=0)
     parser.add_argument('--ada_target', type=float, default=0.6)
-    parser.add_argument('--ada_interval', type=int, default=4)
-    parser.add_argument('--ada_kimg', type=float, default=80)
+    parser.add_argument('--ada_interval', type=int, default=16)
+    parser.add_argument('--ada_kimg', type=float, default=0.6)
     parser.add_argument('--ada_fixed', type=bool, default=False)
     # gp loss
     parser.add_argument('--d_r1', type=bool, default=True)
@@ -134,6 +144,15 @@ if __name__ == '__main__':
                    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
     dataloader = DataLoader(ImageDataset(opt.dataroot, transforms_=transforms_, unaligned=True),
                             batch_size=opt.batchSize, shuffle=True, num_workers=opt.n_cpu)
+
+    transforms_eval = [transforms.ToTensor(),
+                       transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
+    dataloader_eval = DataLoader(ImageDataset(opt.dataroot, transforms_=transforms_eval, mode=opt.eval_mode),
+                                 batch_size=1, shuffle=False, num_workers=opt.n_cpu)
+
+    # eval
+    best_fid = sys.maxsize
+    best_fid_epoch = 0
 
     # Loss plot
     logger = Logger(opt.n_epochs, len(dataloader))
@@ -326,6 +345,20 @@ if __name__ == '__main__':
         torch.save(netD_A.state_dict(), opt.save_dir + '/netD_A.pth')
         torch.save(netD_B.state_dict(), opt.save_dir + '/netD_B.pth')
 
+        # eval model metrics
+        if (epoch+1) % opt.eval_every_n_epoch == 0:
+            fid = eval_metrics(netG_A2B, dataloader_eval, os.path.join(opt.dataroot, '%sB' % opt.eval_mode))
+            tb_logger.add_scalars({'fid': fid}, epoch+1)
+
+            if fid < best_fid:
+                best_fid = fid
+                best_fid_epoch = epoch + 1
+
+                torch.save(netG_A2B.state_dict(), opt.save_dir + '/best_netG_A2B.pth')
+                torch.save(netG_B2A.state_dict(), opt.save_dir + '/best_netG_B2A.pth')
+                torch.save(netD_A.state_dict(), opt.save_dir + '/best_netD_A.pth')
+                torch.save(netD_B.state_dict(), opt.save_dir + '/best_netD_B.pth')
+
         if epoch % opt.save_every_n_epoch == 0:
             torch.save(netG_A2B.state_dict(), opt.save_dir + '/%d_netG_A2B.pth' % epoch)
             torch.save(netG_B2A.state_dict(), opt.save_dir + '/%d_netG_B2A.pth' % epoch)
@@ -333,7 +366,9 @@ if __name__ == '__main__':
             torch.save(netD_B.state_dict(), opt.save_dir + '/%d_netD_B.pth' % epoch)
     ###################################
 
+    print('best_fid: {0}, in epoch {1}'.format(best_fid, best_fid_epoch))
     flog = open(os.path.join(opt.save_dir, 'log_opt.txt'), 'w')
     logs = vars(opt)
-    flog.write(str(logs))
+    flog.write(str(logs) + '\n')
+    flog.write('best_fid: {0}, in epoch {1}'.format(best_fid, best_fid_epoch))
     flog.close()

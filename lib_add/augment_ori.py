@@ -200,7 +200,9 @@ class AugmentPipe(torch.nn.Module):
         adjust = torch.sign(self.p_real_signs.compute() - self.ada_target) * (batch_size * self.ada_interval) / (self.ada_kimg * 1000)
         self.p.copy_((self.p + adjust).max(torch.tensor(0, device=self.p.device).float()))
         self.p.copy_(self.p.min(torch.tensor(self.ada_target + 0.2, device=self.p.device).float()))
+        p_real_signs = self.p_real_signs.compute()
         self.p_real_signs.reset()
+        return p_real_signs
 
     def forward(self, images, debug_percentile=None):
         assert isinstance(images, torch.Tensor) and images.ndim == 4

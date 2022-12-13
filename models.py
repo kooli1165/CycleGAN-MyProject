@@ -151,7 +151,7 @@ class MyGenerator(nn.Module):
 
 class MyGenerator_v0_1(nn.Module):
     def __init__(self, input_nc, output_nc, n_residual_blocks=9):
-        super(MyGenerator, self).__init__()
+        super(MyGenerator_v0_1, self).__init__()
 
         # Initial convolution block
         model = [   nn.ReflectionPad2d(3),

@@ -3,6 +3,7 @@
 import argparse
 import itertools
 import os
+import sys
 
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
@@ -10,12 +11,13 @@ from torch.autograd import Variable
 from PIL import Image
 import torch
 
-from models import MyGenerator
+from models import MyGenerator_v0_1
 from models import Generator
 from models import Discriminator
 from utils import ReplayBuffer
 from utils import LambdaLR
 from utils import Logger
+from utils import TensorboardLogger
 from utils import weights_init_normal
 from utils import run_netD
 from utils import d_logistic_loss
@@ -26,12 +28,23 @@ from utils import compute_gradient_penalty
 from lib_add.augment_ori import AugmentPipe
 from datasets import ImageDataset
 
-# v1.1修改损失函数以适配 自适应p
-#  epoch 200 testb fid 106.74   trainb fid 64.54
+from metrics.eval import eval_metrics
+
+# v1.1  修改损失函数以适配 自适应p
+# v1.2  (调整 G D 训练策略  每n次迭代训练一次G)
+#          训练过程中自动测试fid
+#          ada_kimg 80->8
+#          lambda_D 0.5 -> 1
+# v1.2.1  ada_kimg 8->0.6
+#         ada_interval 4->16
+#         每10epoch 测试fid
+# v2.0   G 替换为3维mask的mygeneratorv0.1   ada_interval 16->4 ada_target 0.6 -> 0.5
+#           fid 99.57 epoch 261
+# v2.1   2.0对照实验 关闭ada再跑一次
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--save_dir', type=str, default='./output/v1.1_dataset1.0')
+    parser.add_argument('--save_dir', type=str, default='./output/v2.1_dataset1.0')
     parser.add_argument('--epoch', type=int, default=0, help='starting epoch')
     parser.add_argument('--n_epochs', type=int, default=400, help='number of epochs of training')
     parser.add_argument('--batchSize', type=int, default=6, help='size of the batches')
@@ -46,17 +59,21 @@ if __name__ == '__main__':
     parser.add_argument('--output_nc', type=int, default=3, help='number of channels of output data')
     parser.add_argument('--cuda', type=bool, default=True, help='use GPU computation')
     parser.add_argument('--n_cpu', type=int, default=8, help='number of cpu threads to use during batch generation')
-    parser.add_argument('--save_every_n_epoch', type=int, default=50)
+    parser.add_argument('--save_every_n_epoch', type=int, default=100)
+    parser.add_argument('--eval_every_n_epoch', type=int, default=1)
+    parser.add_argument('--eval_mode', type=str, default='test')
+
     parser.add_argument('--n_train_D', type=int, default=1, help='每多少次迭代训练一次D')
+    parser.add_argument('--n_train_G', type=int, default=1, help='每多少次迭代训练一次G')
     parser.add_argument('--lambda_G', type=float, default=1.0)
     parser.add_argument('--lambda_Idt', type=float, default=5.0)
     parser.add_argument('--lambda_Cycle', type=float, default=5.0)
-    parser.add_argument('--lambda_D', type=float, default=0.5)
+    parser.add_argument('--lambda_D', type=float, default=1.0)
     # ADA
     parser.add_argument('--ada_start_p', type=float, default=0)
-    parser.add_argument('--ada_target', type=float, default=0.6)
+    parser.add_argument('--ada_target', type=float, default=0.5)
     parser.add_argument('--ada_interval', type=int, default=4)
-    parser.add_argument('--ada_kimg', type=float, default=80)
+    parser.add_argument('--ada_kimg', type=float, default=0.6)
     parser.add_argument('--ada_fixed', type=bool, default=False)
     # gp loss
     parser.add_argument('--d_r1', type=bool, default=True)
@@ -70,20 +87,24 @@ if __name__ == '__main__':
 
     ###### Definition of variables ######
     # ADA
-    augment_pipe = AugmentPipe(opt.ada_start_p, opt.ada_target, opt.ada_interval, opt.ada_kimg).train()
+    # augment_pipe = AugmentPipe(opt.ada_start_p, opt.ada_target, opt.ada_interval, opt.ada_kimg).train()
+    augment_pipe = None
 
     # Networks
-    netG_A2B = Generator(opt.input_nc, opt.output_nc)
-    netG_B2A = Generator(opt.output_nc, opt.input_nc)
+    netG_A2B = MyGenerator_v0_1(opt.input_nc, opt.output_nc)
+    netG_B2A = MyGenerator_v0_1(opt.output_nc, opt.input_nc)
     netD_A = Discriminator(opt.input_nc)
     netD_B = Discriminator(opt.output_nc)
+
+    with_mask = True
 
     if opt.cuda:
         netG_A2B.cuda()
         netG_B2A.cuda()
         netD_A.cuda()
         netD_B.cuda()
-        augment_pipe.cuda()
+        if augment_pipe is not None:
+            augment_pipe.cuda()
 
     netG_A2B.apply(weights_init_normal)
     netG_B2A.apply(weights_init_normal)
@@ -131,22 +152,38 @@ if __name__ == '__main__':
     dataloader = DataLoader(ImageDataset(opt.dataroot, transforms_=transforms_, unaligned=True),
                             batch_size=opt.batchSize, shuffle=True, num_workers=opt.n_cpu)
 
+    transforms_eval = [transforms.ToTensor(),
+                       transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
+    dataloader_eval = DataLoader(ImageDataset(opt.dataroot, transforms_=transforms_eval, mode=opt.eval_mode),
+                                 batch_size=1, shuffle=False, num_workers=opt.n_cpu)
+
+    # eval
+    best_fid = sys.maxsize
+    best_fid_epoch = 0
+
     # Loss plot
     logger = Logger(opt.n_epochs, len(dataloader))
+    tb_logger = TensorboardLogger(output_path=opt.save_dir)
     losses = {}
     # loss_D_A = 0.0
     # loss_D_B = 0.0
     ###################################
 
+    i_G = 0  # 训练G 的迭代次数
+    i_D = 0  # 训练D 的迭代次数
+
     ###### Training ######
     for epoch in range(opt.epoch, opt.n_epochs):
-        i_D = 0  # 训练D 的迭代次数
+
         for i, batch in enumerate(dataloader):
             ## Set model input
             input_A = Tensor(batch['A'].shape[0], opt.input_nc, opt.size, opt.size)
             input_B = Tensor(batch['B'].shape[0], opt.output_nc, opt.size, opt.size)
             real_A = Variable(input_A.copy_(batch['A']))
             real_B = Variable(input_B.copy_(batch['B']))
+
+            if (i + 1) % opt.n_train_G == 0:
+                i_G = i_G + 1
 
             ###### Generators A2B and B2A ######
             optimizer_G.zero_grad()
@@ -155,22 +192,24 @@ if __name__ == '__main__':
             # G_A2B(B) should equal B if real B is fed
             # same_B, same_B_mask = netG_A2B(real_B)
             same_B = netG_A2B(real_B)
+            if with_mask: same_B = same_B[0]
             loss_identity_B = criterion_identity(same_B, real_B) * opt.lambda_Idt
             # G_B2A(A) should equal A if real A is fed
             # same_A, same_A_mask = netG_B2A(real_A)
             same_A = netG_B2A(real_A)
+            if with_mask: same_A = same_A[0]
             loss_identity_A = criterion_identity(same_A, real_A) * opt.lambda_Idt
 
             ## GAN loss
-            # fake_B, fake_B_mask = netG_A2B(real_A)
-            fake_B = netG_A2B(real_A)
+            fake_B, fake_B_mask = netG_A2B(real_A)
+            # fake_B = netG_A2B(real_A)
             # pred_fake = netD_B(fake_B)
             pred_fake = run_netD(fake_B, netD_B, augment_pipe)
             # loss_GAN_A2B = criterion_GAN(pred_fake, target_real) * opt.lambda_G
             loss_GAN_A2B = g_nonsaturating_loss(pred_fake) * opt.lambda_G
 
-            # fake_A, fake_A_mask = netG_B2A(real_B)
-            fake_A = netG_B2A(real_B)
+            fake_A, fake_A_mask = netG_B2A(real_B)
+            # fake_A = netG_B2A(real_B)
             # pred_fake = netD_A(fake_A)
             pred_fake = run_netD(fake_A, netD_A, augment_pipe)
             # loss_GAN_B2A = criterion_GAN(pred_fake, target_real) * opt.lambda_G
@@ -179,10 +218,12 @@ if __name__ == '__main__':
             ## Cycle loss
             # recovered_A, recovered_A_mask = netG_B2A(fake_B)
             recovered_A = netG_B2A(fake_B)
+            if with_mask: recovered_A = recovered_A[0]
             loss_cycle_ABA = criterion_cycle(recovered_A, real_A) * opt.lambda_Cycle
 
             ## recovered_B, recovered_B_mask = netG_A2B(fake_A)
             recovered_B = netG_A2B(fake_A)
+            if with_mask: recovered_B = recovered_B[0]
             loss_cycle_BAB = criterion_cycle(recovered_B, real_B) * opt.lambda_Cycle
 
             ## Total loss
@@ -191,9 +232,11 @@ if __name__ == '__main__':
 
             optimizer_G.step()
 
-            ## path l
-
-
+            ## G loss log
+            losses['loss_G'] = loss_G
+            losses['loss_G_identity'] =  (loss_identity_A + loss_identity_B)
+            losses['loss_G_GAN'] = (loss_GAN_A2B + loss_GAN_B2A)
+            losses['loss_G_cycle'] = (loss_cycle_ABA + loss_cycle_BAB)
 
             ###################################
 
@@ -212,6 +255,8 @@ if __name__ == '__main__':
                     augment_pipe.accumulate_real_sign(pred_real.sign().detach())
 
                 ## Fake loss
+                # with torch.no_grad():
+                #     fake_A = netG_B2A(real_B)
                 fake_A = fake_A_buffer.push_and_pop(fake_A)
                 # pred_fake = netD_A(fake_A.detach())
                 pred_fake = run_netD(fake_A.detach(), netD_A, augment_pipe)
@@ -252,6 +297,8 @@ if __name__ == '__main__':
                     augment_pipe.accumulate_real_sign(pred_real.sign().detach())
 
                 ## Fake loss
+                # with torch.no_grad():
+                #     fake_B = netG_A2B(real_A)
                 fake_B = fake_B_buffer.push_and_pop(fake_B)
                 # pred_fake = netD_B(fake_B.detach())
                 pred_fake = run_netD(fake_B.detach(), netD_B, augment_pipe)
@@ -283,19 +330,19 @@ if __name__ == '__main__':
 
                 if augment_pipe is not None:
                     if (i_D+1) % opt.ada_interval == 0:
-                        augment_pipe.heuristic_update(opt.batchSize)
+                        p_real_signs = augment_pipe.heuristic_update(opt.batchSize)
+                        # losses['rt'] = p_real_signs
+                        tb_logger.add_scalars({'rt': p_real_signs}, epoch * opt.batchSize + i)
                     losses['ada_p'] = augment_pipe.p
 
             ## Progress report (http://localhost:8097)
-            losses['loss_G'] = loss_G
-            losses['loss_G_identity'] =  (loss_identity_A + loss_identity_B)
-            losses['loss_G_GAN'] = (loss_GAN_A2B + loss_GAN_B2A)
-            losses['loss_G_cycle'] = (loss_cycle_ABA + loss_cycle_BAB)
 
             logger.log(losses,
-                       images={'real_A': real_A, 'real_B': real_B, 'fake_A': fake_A, 'fake_B': fake_B})
-                       # images={'real_A': real_A, 'real_B': real_B, 'fake_A': fake_A, 'fake_B': fake_B,
-                       #         'fake_A_mask':fake_A_mask, 'fake_B_mask':fake_B_mask})
+                       # images={'real_A': real_A, 'real_B': real_B, 'fake_A': fake_A, 'fake_B': fake_B})
+                       images={'real_A': real_A, 'real_B': real_B, 'fake_A': fake_A, 'fake_B': fake_B,
+                               'fake_A_mask':fake_A_mask, 'fake_B_mask':fake_B_mask})
+
+            tb_logger.add_scalars(losses, epoch * opt.batchSize + i)
 
         ## Update learning rates
         lr_scheduler_G.step()
@@ -311,6 +358,20 @@ if __name__ == '__main__':
         torch.save(netD_A.state_dict(), opt.save_dir + '/netD_A.pth')
         torch.save(netD_B.state_dict(), opt.save_dir + '/netD_B.pth')
 
+        # eval model metrics
+        if (epoch+1) % opt.eval_every_n_epoch == 0:
+            fid = eval_metrics(netG_A2B, dataloader_eval, os.path.join(opt.dataroot, '%sB' % opt.eval_mode), with_mask=with_mask)
+            tb_logger.add_scalars({'fid': fid}, epoch+1)
+
+            if fid < best_fid:
+                best_fid = fid
+                best_fid_epoch = epoch + 1
+
+                torch.save(netG_A2B.state_dict(), opt.save_dir + '/best_netG_A2B.pth')
+                torch.save(netG_B2A.state_dict(), opt.save_dir + '/best_netG_B2A.pth')
+                torch.save(netD_A.state_dict(), opt.save_dir + '/best_netD_A.pth')
+                torch.save(netD_B.state_dict(), opt.save_dir + '/best_netD_B.pth')
+
         if epoch % opt.save_every_n_epoch == 0:
             torch.save(netG_A2B.state_dict(), opt.save_dir + '/%d_netG_A2B.pth' % epoch)
             torch.save(netG_B2A.state_dict(), opt.save_dir + '/%d_netG_B2A.pth' % epoch)
@@ -318,7 +379,9 @@ if __name__ == '__main__':
             torch.save(netD_B.state_dict(), opt.save_dir + '/%d_netD_B.pth' % epoch)
     ###################################
 
+    print('best_fid: {0}, in epoch {1}'.format(best_fid, best_fid_epoch))
     flog = open(os.path.join(opt.save_dir, 'log_opt.txt'), 'w')
     logs = vars(opt)
-    flog.write(str(logs))
+    flog.write(str(logs) + '\n')
+    flog.write('best_fid: {0}, in epoch {1}'.format(best_fid, best_fid_epoch))
     flog.close()
