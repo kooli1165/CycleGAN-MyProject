@@ -27,6 +27,30 @@ class ImageDataset(Dataset):
         return max(len(self.files_A), len(self.files_B))
 
 
+class ImageDatasetWithFilename(Dataset):
+    def __init__(self, root, transforms_=None, unaligned=False, mode='train'):
+        self.transform = transforms.Compose(transforms_)
+        self.unaligned = unaligned
+        self.files_A = sorted(glob.glob(os.path.join(root, '%sA' % mode) + '/*.*'))
+        self.files_B = sorted(glob.glob(os.path.join(root, '%sB' % mode) + '/*.*'))
+
+    def __getitem__(self, index):
+        item_A = self.transform(Image.open(self.files_A[index % len(self.files_A)]))
+        item_A_filename = self.files_A[index % len(self.files_A)]
+
+        if self.unaligned:
+            item_B_filename = self.files_B[random.randint(0, len(self.files_B) - 1)]
+            item_B = self.transform(Image.open(item_B_filename))
+        else:
+            item_B_filename = self.files_B[index % len(self.files_B)]
+            item_B = self.transform(Image.open(self.files_B[index % len(self.files_B)]))
+
+        return {'A': item_A, 'B': item_B, 'A_filename': item_A_filename, 'B_filename': item_B_filename}
+
+    def __len__(self):
+        return max(len(self.files_A), len(self.files_B))
+
+
 class DingziLabelDataset(Dataset):
     def __init__(self, img_path, attr_path, transforms_=None, unaligned=False, mode='train'):
         self.transform = transforms.Compose(transforms_)

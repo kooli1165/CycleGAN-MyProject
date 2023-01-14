@@ -42,17 +42,20 @@ from metrics.eval import eval_metrics
 #           fid 99.57 epoch 261
 # v2.1   2.0对照实验 关闭ada再跑一次
 #           fid 98.79 epoch 252
+# v2.1.1  lr 0.0002 -> 0.0001
+#           fid 98.73 epoch 192
+# v2.1.2  关闭输入数据的增强
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--save_dir', type=str, default='./output/v2.1_dataset1.0')
+    parser.add_argument('--save_dir', type=str, default='./output/v2.1.2_dataset1.0')
     parser.add_argument('--epoch', type=int, default=0, help='starting epoch')
     parser.add_argument('--n_epochs', type=int, default=400, help='number of epochs of training')
     parser.add_argument('--batchSize', type=int, default=6, help='size of the batches')
     parser.add_argument('--dataroot', type=str, default='datasets/dingzi_v1_0/',
                         help='root directory of the dataset')
-    parser.add_argument('--lr', type=float, default=0.0002, help='initial learning rate')
-    parser.add_argument('--lr_D', type=float, default=0.0002, help='initial learning rate')
+    parser.add_argument('--lr', type=float, default=0.0001, help='initial learning rate')
+    parser.add_argument('--lr_D', type=float, default=0.0001, help='initial learning rate')
     parser.add_argument('--decay_epoch', type=int, default=100,
                         help='epoch to start linearly decaying the learning rate to 0')
     parser.add_argument('--size', type=int, default=256, help='size of the data crop (squared assumed)')
@@ -145,9 +148,10 @@ if __name__ == '__main__':
     fake_B_buffer = ReplayBuffer()
 
     # Dataset loader
-    transforms_ = [transforms.Resize(int(opt.size * 1.12), Image.BICUBIC),
-                   transforms.RandomCrop(opt.size),
-                   transforms.RandomHorizontalFlip(),
+    transforms_ = [
+                   # transforms.Resize(int(opt.size * 1.12), Image.BICUBIC),
+                   # transforms.RandomCrop(opt.size),
+                   # transforms.RandomHorizontalFlip(),
                    transforms.ToTensor(),
                    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
     dataloader = DataLoader(ImageDataset(opt.dataroot, transforms_=transforms_, unaligned=True),

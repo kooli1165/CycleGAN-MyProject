@@ -13,6 +13,7 @@ import torch
 
 from models import MyGenerator_v0_1
 from models import Generator
+from models import StarganDiscriminator
 from models import Discriminator
 from utils import ReplayBuffer
 from utils import LambdaLR
@@ -31,7 +32,7 @@ from datasets import ImageDataset
 from metrics.eval import eval_metrics
 
 # v1.1  修改损失函数以适配 自适应p
-# v1.2  #未启用(调整 G D 训练策略  每n次迭代训练一次G)
+# v1.2  (调整 G D 训练策略  每n次迭代训练一次G)
 #          训练过程中自动测试fid
 #          ada_kimg 80->8
 #          lambda_D 0.5 -> 1
@@ -42,10 +43,12 @@ from metrics.eval import eval_metrics
 #           fid 99.57 epoch 261
 # v2.1   2.0对照实验 关闭ada再跑一次
 #           fid 98.79 epoch 252
+# v3.0   D 替换为 stargan D    5次迭代训练一次D  mygeneratev0.1
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--save_dir', type=str, default='./output/v2.1_dataset1.0')
+    parser.add_argument('--save_dir', type=str, default='./output/v3.0_dataset1.0')
     parser.add_argument('--epoch', type=int, default=0, help='starting epoch')
     parser.add_argument('--n_epochs', type=int, default=400, help='number of epochs of training')
     parser.add_argument('--batchSize', type=int, default=6, help='size of the batches')
@@ -64,7 +67,7 @@ if __name__ == '__main__':
     parser.add_argument('--eval_every_n_epoch', type=int, default=1)
     parser.add_argument('--eval_mode', type=str, default='test')
 
-    parser.add_argument('--n_train_D', type=int, default=1, help='每多少次迭代训练一次D')
+    parser.add_argument('--n_train_D', type=int, default=5, help='每多少次迭代训练一次D')
     parser.add_argument('--n_train_G', type=int, default=1, help='每多少次迭代训练一次G')
     parser.add_argument('--lambda_G', type=float, default=1.0)
     parser.add_argument('--lambda_Idt', type=float, default=5.0)
@@ -88,14 +91,13 @@ if __name__ == '__main__':
 
     ###### Definition of variables ######
     # ADA
-    # augment_pipe = AugmentPipe(opt.ada_start_p, opt.ada_target, opt.ada_interval, opt.ada_kimg).train()
-    augment_pipe = None
+    augment_pipe = AugmentPipe(opt.ada_start_p, opt.ada_target, opt.ada_interval, opt.ada_kimg).train()
 
     # Networks
     netG_A2B = MyGenerator_v0_1(opt.input_nc, opt.output_nc)
     netG_B2A = MyGenerator_v0_1(opt.output_nc, opt.input_nc)
-    netD_A = Discriminator(opt.input_nc)
-    netD_B = Discriminator(opt.output_nc)
+    netD_A = StarganDiscriminator(opt.input_nc)
+    netD_B = StarganDiscriminator(opt.output_nc)
 
     with_mask = True
 
@@ -104,8 +106,7 @@ if __name__ == '__main__':
         netG_B2A.cuda()
         netD_A.cuda()
         netD_B.cuda()
-        if augment_pipe is not None:
-            augment_pipe.cuda()
+        augment_pipe.cuda()
 
     netG_A2B.apply(weights_init_normal)
     netG_B2A.apply(weights_init_normal)
@@ -239,6 +240,9 @@ if __name__ == '__main__':
             losses['loss_G_GAN'] = (loss_GAN_A2B + loss_GAN_B2A)
             losses['loss_G_cycle'] = (loss_cycle_ABA + loss_cycle_BAB)
 
+
+            # tb_logger.writer.add_image('fakeA_mask')
+
             ###################################
 
             if (i+1) % opt.n_train_D == 0:
@@ -258,6 +262,7 @@ if __name__ == '__main__':
                 ## Fake loss
                 # with torch.no_grad():
                 #     fake_A = netG_B2A(real_B)
+                #     if with_mask: fake_A = fake_A[0]
                 fake_A = fake_A_buffer.push_and_pop(fake_A)
                 # pred_fake = netD_A(fake_A.detach())
                 pred_fake = run_netD(fake_A.detach(), netD_A, augment_pipe)
@@ -300,6 +305,7 @@ if __name__ == '__main__':
                 ## Fake loss
                 # with torch.no_grad():
                 #     fake_B = netG_A2B(real_A)
+                #     if with_mask: fake_B = fake_B[0]
                 fake_B = fake_B_buffer.push_and_pop(fake_B)
                 # pred_fake = netD_B(fake_B.detach())
                 pred_fake = run_netD(fake_B.detach(), netD_B, augment_pipe)

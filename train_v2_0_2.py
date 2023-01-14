@@ -31,7 +31,7 @@ from datasets import ImageDataset
 from metrics.eval import eval_metrics
 
 # v1.1  修改损失函数以适配 自适应p
-# v1.2  #未启用(调整 G D 训练策略  每n次迭代训练一次G)
+# v1.2  (调整 G D 训练策略  每n次迭代训练一次G)
 #          训练过程中自动测试fid
 #          ada_kimg 80->8
 #          lambda_D 0.5 -> 1
@@ -40,19 +40,19 @@ from metrics.eval import eval_metrics
 #         每10epoch 测试fid
 # v2.0   G 替换为3维mask的mygeneratorv0.1   ada_interval 16->4 ada_target 0.6 -> 0.5
 #           fid 99.57 epoch 261
-# v2.1   2.0对照实验 关闭ada再跑一次
-#           fid 98.79 epoch 252
+# v2.0.1   继承2.0 调整学习率0.0002->0.0001 decay_epoch
+# v2.0.2   继承2.0.1  关闭自带的数据增强
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--save_dir', type=str, default='./output/v2.1_dataset1.0')
+    parser.add_argument('--save_dir', type=str, default='./output/v2.0.2_dataset1.0')
     parser.add_argument('--epoch', type=int, default=0, help='starting epoch')
     parser.add_argument('--n_epochs', type=int, default=400, help='number of epochs of training')
     parser.add_argument('--batchSize', type=int, default=6, help='size of the batches')
     parser.add_argument('--dataroot', type=str, default='datasets/dingzi_v1_0/',
                         help='root directory of the dataset')
-    parser.add_argument('--lr', type=float, default=0.0002, help='initial learning rate')
-    parser.add_argument('--lr_D', type=float, default=0.0002, help='initial learning rate')
+    parser.add_argument('--lr', type=float, default=0.0001, help='initial learning rate')
+    parser.add_argument('--lr_D', type=float, default=0.0001, help='initial learning rate')
     parser.add_argument('--decay_epoch', type=int, default=100,
                         help='epoch to start linearly decaying the learning rate to 0')
     parser.add_argument('--size', type=int, default=256, help='size of the data crop (squared assumed)')
@@ -88,8 +88,7 @@ if __name__ == '__main__':
 
     ###### Definition of variables ######
     # ADA
-    # augment_pipe = AugmentPipe(opt.ada_start_p, opt.ada_target, opt.ada_interval, opt.ada_kimg).train()
-    augment_pipe = None
+    augment_pipe = AugmentPipe(opt.ada_start_p, opt.ada_target, opt.ada_interval, opt.ada_kimg).train()
 
     # Networks
     netG_A2B = MyGenerator_v0_1(opt.input_nc, opt.output_nc)
@@ -104,8 +103,7 @@ if __name__ == '__main__':
         netG_B2A.cuda()
         netD_A.cuda()
         netD_B.cuda()
-        if augment_pipe is not None:
-            augment_pipe.cuda()
+        augment_pipe.cuda()
 
     netG_A2B.apply(weights_init_normal)
     netG_B2A.apply(weights_init_normal)
@@ -145,9 +143,10 @@ if __name__ == '__main__':
     fake_B_buffer = ReplayBuffer()
 
     # Dataset loader
-    transforms_ = [transforms.Resize(int(opt.size * 1.12), Image.BICUBIC),
-                   transforms.RandomCrop(opt.size),
-                   transforms.RandomHorizontalFlip(),
+    transforms_ = [
+                   # transforms.Resize(int(opt.size * 1.12), Image.BICUBIC),
+                   # transforms.RandomCrop(opt.size),
+                   # transforms.RandomHorizontalFlip(),
                    transforms.ToTensor(),
                    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
     dataloader = DataLoader(ImageDataset(opt.dataroot, transforms_=transforms_, unaligned=True),

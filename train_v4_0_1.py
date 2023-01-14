@@ -11,11 +11,12 @@ from torch.autograd import Variable
 from PIL import Image
 import torch
 
-from models import MyGenerator_v0_1
+from models import MyGenerator_v0_3
 from models import Generator
 from models import Discriminator
 from utils import ReplayBuffer
 from utils import LambdaLR
+from utils import MyLambdaLR
 from utils import Logger
 from utils import TensorboardLogger
 from utils import weights_init_normal
@@ -31,7 +32,7 @@ from datasets import ImageDataset
 from metrics.eval import eval_metrics
 
 # v1.1  修改损失函数以适配 自适应p
-# v1.2  #未启用(调整 G D 训练策略  每n次迭代训练一次G)
+# v1.2  (调整 G D 训练策略  每n次迭代训练一次G)
 #          训练过程中自动测试fid
 #          ada_kimg 80->8
 #          lambda_D 0.5 -> 1
@@ -40,12 +41,16 @@ from metrics.eval import eval_metrics
 #         每10epoch 测试fid
 # v2.0   G 替换为3维mask的mygeneratorv0.1   ada_interval 16->4 ada_target 0.6 -> 0.5
 #           fid 99.57 epoch 261
-# v2.1   2.0对照实验 关闭ada再跑一次
-#           fid 98.79 epoch 252
+# v2.0.1   继承2.0 调整学习率0.0002->0.0001 decay_epoch
+# v2.0.2   继承2.0.1  关闭自带的数据增强
+# v2.0.3   继承2.0.1  关闭自带的数据增强  ada_interval 4->16
+# v2.0.4   继承2.0.2  关闭自带的数据增强  调整学习率下降策略  v2.0.4.1  100.69 in 109
+# v4.0     继承2.0.4  pixelShuffle
+# v4.0.1   开启自带数据增强
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--save_dir', type=str, default='./output/v2.1_dataset1.0')
+    parser.add_argument('--save_dir', type=str, default='./output/v4.0.1_dataset1.0')
     parser.add_argument('--epoch', type=int, default=0, help='starting epoch')
     parser.add_argument('--n_epochs', type=int, default=400, help='number of epochs of training')
     parser.add_argument('--batchSize', type=int, default=6, help='size of the batches')
@@ -53,6 +58,8 @@ if __name__ == '__main__':
                         help='root directory of the dataset')
     parser.add_argument('--lr', type=float, default=0.0002, help='initial learning rate')
     parser.add_argument('--lr_D', type=float, default=0.0002, help='initial learning rate')
+    parser.add_argument('--min_lr', type=float, default=0.0001, help='initial learning rate')
+    parser.add_argument('--min_lr_D', type=float, default=0.0001, help='initial learning rate')
     parser.add_argument('--decay_epoch', type=int, default=100,
                         help='epoch to start linearly decaying the learning rate to 0')
     parser.add_argument('--size', type=int, default=256, help='size of the data crop (squared assumed)')
@@ -88,12 +95,11 @@ if __name__ == '__main__':
 
     ###### Definition of variables ######
     # ADA
-    # augment_pipe = AugmentPipe(opt.ada_start_p, opt.ada_target, opt.ada_interval, opt.ada_kimg).train()
-    augment_pipe = None
+    augment_pipe = AugmentPipe(opt.ada_start_p, opt.ada_target, opt.ada_interval, opt.ada_kimg).train()
 
     # Networks
-    netG_A2B = MyGenerator_v0_1(opt.input_nc, opt.output_nc)
-    netG_B2A = MyGenerator_v0_1(opt.output_nc, opt.input_nc)
+    netG_A2B = MyGenerator_v0_3(opt.input_nc, opt.output_nc)
+    netG_B2A = MyGenerator_v0_3(opt.output_nc, opt.input_nc)
     netD_A = Discriminator(opt.input_nc)
     netD_B = Discriminator(opt.output_nc)
 
@@ -104,8 +110,7 @@ if __name__ == '__main__':
         netG_B2A.cuda()
         netD_A.cuda()
         netD_B.cuda()
-        if augment_pipe is not None:
-            augment_pipe.cuda()
+        augment_pipe.cuda()
 
     netG_A2B.apply(weights_init_normal)
     netG_B2A.apply(weights_init_normal)
@@ -124,15 +129,25 @@ if __name__ == '__main__':
     optimizer_D_A = torch.optim.Adam(netD_A.parameters(), lr=opt.lr_D, betas=(0.5, 0.999))
     optimizer_D_B = torch.optim.Adam(netD_B.parameters(), lr=opt.lr_D, betas=(0.5, 0.999))
 
+    # lr_scheduler_G = torch.optim.lr_scheduler.LambdaLR(optimizer_G,
+    #                                                    lr_lambda=LambdaLR(opt.n_epochs, opt.epoch,
+    #                                                                       opt.decay_epoch).step)
+    # lr_scheduler_D_A = torch.optim.lr_scheduler.LambdaLR(optimizer_D_A,
+    #                                                      lr_lambda=LambdaLR(opt.n_epochs, opt.epoch,
+    #                                                                         opt.decay_epoch).step)
+    # lr_scheduler_D_B = torch.optim.lr_scheduler.LambdaLR(optimizer_D_B,
+    #                                                      lr_lambda=LambdaLR(opt.n_epochs, opt.epoch,
+    #                                                                         opt.decay_epoch).step)
+
     lr_scheduler_G = torch.optim.lr_scheduler.LambdaLR(optimizer_G,
-                                                       lr_lambda=LambdaLR(opt.n_epochs, opt.epoch,
-                                                                          opt.decay_epoch).step)
+                                                       lr_lambda=MyLambdaLR(opt.n_epochs, opt.epoch,
+                                                                          opt.decay_epoch, opt.lr, opt.min_lr).step)
     lr_scheduler_D_A = torch.optim.lr_scheduler.LambdaLR(optimizer_D_A,
-                                                         lr_lambda=LambdaLR(opt.n_epochs, opt.epoch,
-                                                                            opt.decay_epoch).step)
+                                                         lr_lambda=MyLambdaLR(opt.n_epochs, opt.epoch,
+                                                                            opt.decay_epoch, opt.lr_D, opt.min_lr_D).step)
     lr_scheduler_D_B = torch.optim.lr_scheduler.LambdaLR(optimizer_D_B,
-                                                         lr_lambda=LambdaLR(opt.n_epochs, opt.epoch,
-                                                                            opt.decay_epoch).step)
+                                                         lr_lambda=MyLambdaLR(opt.n_epochs, opt.epoch,
+                                                                            opt.decay_epoch, opt.lr_D, opt.min_lr_D).step)
 
     # Inputs & targets memory allocation
     Tensor = torch.cuda.FloatTensor if opt.cuda else torch.Tensor
@@ -145,7 +160,8 @@ if __name__ == '__main__':
     fake_B_buffer = ReplayBuffer()
 
     # Dataset loader
-    transforms_ = [transforms.Resize(int(opt.size * 1.12), Image.BICUBIC),
+    transforms_ = [
+                   transforms.Resize(int(opt.size * 1.12), Image.BICUBIC),
                    transforms.RandomCrop(opt.size),
                    transforms.RandomHorizontalFlip(),
                    transforms.ToTensor(),

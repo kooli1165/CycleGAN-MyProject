@@ -123,6 +123,23 @@ class LambdaLR():
     def step(self, epoch):
         return 1.0 - max(0, epoch + self.offset - self.decay_start_epoch)/(self.n_epochs - self.decay_start_epoch)
 
+
+class MyLambdaLR():
+    def __init__(self, n_epochs, offset, decay_start_epoch, start_lr, end_lr):
+        assert ((n_epochs - decay_start_epoch) > 0), "Decay must start before the training session ends!"
+        self.n_epochs = n_epochs
+        self.offset = offset
+        self.decay_start_epoch = decay_start_epoch
+        self.start_lr = start_lr
+        self.end_lr = end_lr
+        self.ratio = end_lr / start_lr
+
+    def step(self, epoch):
+        # return 1.0 - max(0, epoch + self.offset - self.decay_start_epoch)/(self.n_epochs - self.decay_start_epoch)
+        lr = 1.0 - (1.0 - self.ratio) * max(0, (epoch + self.offset - self.decay_start_epoch))/(self.n_epochs - self.decay_start_epoch)
+        return lr
+
+
 def weights_init_normal(m):
     classname = m.__class__.__name__
     if classname.find('Conv') != -1:
